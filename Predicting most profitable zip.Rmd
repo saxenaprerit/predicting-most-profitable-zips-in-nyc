@@ -1,0 +1,466 @@
+---
+title: "Analysis to determine most profitable zipcodes in NYC"
+author: "Prerit Saxena"
+date: "April 8, 2018"
+output:
+  html_document:
+    theme: simplex
+    highlight: haddock
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn=-1)
+
+```
+
+# {.tabset}
+
+## Introduction
+
+### Objective
+
+A real estate company is in the business of purchasing properties and renting it out on short term to make profits. As a part of their business strategy, they wish to purchase a few properties in New York City and rent them out through AirBnb to generate revenue. It has already been established that 2-bedroom apartments are the most profitable. 
+
+The objective of the analysis now is to identify the most profitable zipcodes in NYC.
+
+### Data sets
+
+Two datasets have been originally provided for the analysis:
+
+1) Zillow median home value dataset: Contains information about median prices of apartments through time
+2) AirBnb dataset: Contains information about listing of properties on AirBnb website
+
+Additionally, another dataset mapping zipcodes to latitude and longitude has been used. The source for the dataset is below:
+https://www.census.gov/geo/maps-data/data/gazetteer2017.html
+
+### Approach
+
+The overall profit for a particular property can depend on 2 factors:
+
+1) The increase in value of the property over time
+2) The revenue generated from the property through rent
+
+In this problem, the same concept has been applied to zipcodes. Median increase in value of a property in a zipcode in combination with average rent generated from a peroperty in that zipcode gives the profit. 
+
+A 10 year window has been considered for determining growtht rate in value of a property and projections over the next 10 years along with rent give the most profitable zipcodes in NYC to invest.
+
+### Assumptions
+
+1) 10 year look back has been considered for growth in price of a property. This helps in focusing on recent trends in property rates rather than long term prices.
+2) Growth projections have been determined for short term(5 year), medium term(10 year) and long term(15 years). Medium term has been used to determine most profitable zipcodes.
+3) Occupancy of listings has been assumed to be 75%
+4) No mortgage/interest rate has been considered for property purchase
+5) Time value of money is 0%
+6) All properties and all square feet within each locale can be assumed to be homogenous
+
+### Calculation
+
+Profit after n years for a zip code can be given by:
+
+Profit = ((Purchase Price x YOY increase in value x years(n))/100 + median revenue per property through rent x years(n))
+
+### Reading the datasets
+
+```{r}
+
+rm(list = ls(all=TRUE))
+
+setwd("C:/Users/Prerit/Desktop/UCinn MSBA Course/Career Services/Capital One/airbnb-zillow-data-challenge-master")
+
+suppressMessages(library(data.table))
+
+zillow <- fread('Zip_Zhvi_2bedroom.csv', header = TRUE, na.strings=c("", " ", NA), stringsAsFactors = T, strip.white = T)
+
+listings <- fread('listings.csv', header = TRUE, na.strings=c("", " ", NA), stringsAsFactors = T, strip.white = T)
+
+# Checking structure
+
+# str(zillow)
+# str(listings)
+
+# checking summary
+
+# summary(zillow)
+# summary(listings)
+```
+
+## Data Quality Check
+
+### Understanding the data
+
+Most relevant columns in the datasets are zipcode in both, median value prices in zillow dataset and price per night in AirBnb dataset
+
+### Data Quality
+
+There are few data qualities issues in both the datasets:
+
+Zillow:
+
+1) Data Sparsity: Median price values are present for different starting points for different zipcodes
+
+Listings: 
+
+1) Zipcodes: 
+    -> Many zipcodes are NAs while a lot of others contain values "" or " ". All these have been converted to standard NA format while reading the file
+    -> Few zipcodes have length more than 5. First 5 characters have been considered for those zip codes
+    -> 1 zip code has value '1m'. It has been removed from the dataset
+
+```{r}
+suppressMessages(library(sqldf))
+
+NYC_zillow <- sqldf('select * from zillow where City like "%New York%"')
+
+listings2 <- listings[is.na(zipcode) == FALSE]
+head(sort(table(listings2$zipcode)))
+listings2$zipcode <- substr(listings2$zipcode,1,5)
+# listings2 <- sort(table(listings2$zipcode))
+listings2 <- listings2[zipcode!='1m']
+head(sort(table(listings2$zipcode), decreasing = T))
+
+```
+
+2) Redundant columns: Columns city and state are also present in zillow dataset and hence, are redundant. These can be removed in listing dataset
+
+```{r}
+
+# Duplicate column names present in the data
+
+listings2$city <- NULL
+listings2$state <- NULL
+
+```
+
+3) Removing columns with high missing values: Checking for missing values in the listings dataset and removeing those with high missing values
+
+```{r}
+
+# columns with maximum NAs
+
+head(sort(colSums(is.na(listings2)), decreasing = T))
+
+# Removing columns with large missing values
+
+listings2$has_availability <- NULL
+listings2$license <- NULL
+listings2$jurisdiction_names <- NULL
+
+```
+
+4) Setting format of 'price' correctly : 'Price' format has been changed to numeric for computational purposes
+
+```{r}
+
+# Setting format of price correctly
+
+listings2$price <- as.numeric(listings2$price)
+
+```
+
+### Creating additional columns
+
+1) YoY_inc <- Defined as year-on-year increase of median value if a property in a zip code calculated using last 10 years' data
+
+YoY_inc = ((Value(Jun '17)-Value(Jul '08))/Value(Jul '08))*100/10
+
+2) Last Price <- Defined as the price at which the property would be bought. Calculated as the median value of the property in Jun 2017
+
+```{r}
+# Creating additional columns
+
+NYC_zillow$yoy_10_inc <- (((NYC_zillow$`2017-06`-NYC_zillow$`2008-07`)/NYC_zillow$`2008-07`)*100)/10
+summary(NYC_zillow$yoy_10_inc)
+hist(NYC_zillow$yoy_10_inc, breaks = 26)
+
+NYC_zillow$last_price <- NYC_zillow$`2017-06`
+summary(NYC_zillow$last_price)
+hist(NYC_zillow$last_price, breaks = 26)
+
+```
+
+## Data Munging
+
+### Merging the datasets
+
+A function called joining has been created to merge the datasets after the preprocessing has been done. This functions takes care of renaming the join column, filtering by bedrooms and joining the datasets.
+
+
+```{r}
+
+# doing a inner join through zipcodes
+
+suppressMessages(library(plyr))
+
+joining <- function(zillow, airbnb)
+{
+  zillow <- rename(zillow, c("RegionName" = "zipcode"))
+  # str(zillow)
+  
+  zillow_sub <- zillow[,-c(8:262)]
+  # str(zillow_sub)
+  
+  city_listings <- join(airbnb[bedrooms == 2], zillow_sub, by = "zipcode", type = "inner")
+  
+  return(city_listings)
+}
+
+NYC_listings <- joining(NYC_zillow, listings2)
+
+```
+
+### Quick stats on merged dataset
+
+```{r}
+# EDA on NYC listings
+
+# 1. Number of Unique zipcodes
+
+zipcount <- length(unique(NYC_listings$zipcode))
+zipcount
+
+# 2. Number of properties in each zip code
+
+zip_prop <- sqldf('select zipcode, count(distinct id) as props from NYC_listings group by zipcode order by count(distinct id) desc')
+zip_prop
+
+# 3. Average price in each zip code
+
+zip_price <- sqldf('select zipcode, avg(price) as avg_price from NYC_listings group by zipcode order by avg(price) desc')
+zip_price
+
+```
+
+### Addiitonal columns for profitability calculation
+
+Few more columns are required in the merged dataset to calculate profitability of a zip code:
+
+1) Occupancy: Calculated as 75% of 365 days
+2) Revenue per listing: Calculated as price per night * occupancy
+3) zipwise revenue: Calculated as median revenue of all properties grouped by zipcode
+
+
+```{r}
+
+# Additional Columns for NYC_listings
+
+NYC_listings$occupancy <- 365*0.75
+NYC_listings$revenue <- NYC_listings$price*NYC_listings$occupancy
+
+# mean revenue per zipcode
+
+zipwise_revenue <- sqldf('select zipcode, median(revenue) as median_revenue_zip from NYC_listings group by zipcode')
+
+NYC_listings2 <- join(NYC_listings, zipwise_revenue, by = "zipcode", type = "inner")
+
+```
+
+### Calculating profitability
+
+A function has been created to calculate profit from every zip code over a particular number of years. Flexibility to manipulate the calculation of profit and number of years has been provided through the function. Currently, profits have been calculated for 5,10 and 15 years.
+
+
+```{r}
+
+profitable <- function(df, years)
+{
+  profit_percent <- 0
+  profit_percent <- ((((df$last_price*df$yoy_10_inc*years)/100 + df$median_revenue_zip *years)-df$last_price)/df$last_price)*100
+  return(profit_percent)
+}
+
+NYC_listings2$profit_5 <- profitable(NYC_listings2, 5)
+NYC_listings2$profit_10 <- profitable(NYC_listings2, 10)
+NYC_listings2$profit_15 <- profitable(NYC_listings2, 15)
+
+# str(NYC_listings2)
+
+```
+
+### Most profitable zip codes
+
+Assuming 10 year window to be apt for the analysis, the most profitable zips have been calculated.
+
+```{r}
+
+# assuming 10 year period for evaluation of profit
+
+most_profitable_medium <- unique(subset(NYC_listings2[order(profit_10, decreasing = T)], select = c("zipcode","latitude", "longitude", "profit_10")))
+most_profitable_zips <- unique(subset(most_profitable_medium, select=c(1,4)))
+most_profitable_zips$rank <- c(1:22)
+most_profitable_zips
+
+```
+
+## Visualization
+
+### So, here goes the story...
+
+New York City is an expensive place to live it. This is mainly because of the high prices of properties in the business capital of the nation. New York City comprises primarily of 5 islands - Manhattan, Queens, Bronx, Staten Island and Brooklyn.
+
+While out of the above 5 islands, few areas like Manhattan are expensive while few others like Brooklyn are comparitively cheaper.However, the value of real estate in all these areas has ben soaring in the last 10 years. Here's a quick plot to understand the increase in trend over the years.
+
+```{r}
+
+# Property Prices graph
+
+# str(NYC_zillow)
+
+NYC2 <- NYC_zillow[,c(2,8:262)]
+NYC2 <- rename(NYC2, replace = c("RegionName"= "zipcode"))
+
+my_result <- melt(subset(NYC2, select = c(1,137:256)), id = c("zipcode"))
+my_result <- my_result[order(my_result$zipcode),]
+
+library(ggplot2)
+
+ggplot(my_result, aes(x = variable, y = value, group = zipcode)) + 
+  geom_line(aes(color = zipcode), size = 1) +
+  scale_color_manual(values = c(1:26)) +
+  theme_minimal() + labs(x = "years(2008 - 2017)") + labs(y = "median value of property") + labs("Trend of property values by zip") + theme(axis.text.x = element_blank())
+
+```
+
+But that being said, people visiting the city of dreams prefer to stay in Manhattan area to be in the epicenter of all that New York City offers. They rent apartments on AirBnb for their short trip which is actually a cheaper option than traditional hotels in the city. As a result, more happening areas like Manhattan have higher number of AirBnb listings than far off areas like Queens or Staten Island. Also, they are comparitively expensive. Here's a visualization of per night rates of AirBnb listings by Neighbourhood.
+
+```{r}
+
+# Box plot of neighbourhood group wise price
+
+library(leaflet)
+pal <- colorFactor(rainbow, domain = NULL)
+  
+p <- ggplot(NYC_listings, aes(neighbourhood_group_cleansed, price))
+p + geom_boxplot(aes(colour=NYC_listings$neighbourhood_group_cleansed),outlier.colour = "red", outlier.shape = 4, show.legend = F) + geom_jitter(width = 0.2, colour = '#366dc4') + labs(title = "Neighbourhood group wise prices") + labs(x = "Neighbourhood Group") + labs(y = "Prices per night for listings(in $)")
+
+```
+
+We can see from the chart above that Manhattan and Brooklyn have the most listings with Manhattan being expensive than Brooklyn.Brooklyn also has a lot of outliers indicating presence of a small expensive neighbourhood within. Though Queens and Staten Island have very high and very low median respectively, there is a lack of confidence due to low number of listings.
+
+### Why are the real estate companies interested ?
+
+With ever increasing value of properties and profits through AirBnb listings, real estate companies are planning to make big money by investing into properties in NYC. 
+
+Having all the data handy from zillow(which provides median value of an apartment by year) and AirBnb(listings), the client wants to understand through data which zipcodes are best to invest in.
+
+The approach of calculating profit% after 10 years of investment for all the available 22 zipcodes has been followed and this gives an ordered list of zipcodes ranked by their profit%.
+
+```{r}
+
+most_profitable_zips
+
+```
+
+We can see that some zip codes have positive profit while a lot others have negative profit. This can be understood by the fact that cost of properties is very high in NYC and it might take significant amount of years to reach a break-even point. Lets see how they look like in terms of profit %.
+
+```{r}
+
+# bar chart
+
+library(ggplot2)
+
+# Source: https://www.census.gov/geo/maps-data/data/gazetteer2017.html
+
+zip_file <- fread('2017_Gaz_zcta_national.txt', header = TRUE, colClasses = c('character', 'numeric', 'numeric', 'numeric', 'numeric', 'numeric', 'numeric'))
+str(zip_file)
+
+zip_file$zipcode <- zip_file$GEOID
+
+new_map <- join(most_profitable_medium[,-c(2,3)], zip_file[,c(6,7,8)], by = "zipcode", type = "left")
+new_map <- unique(new_map)
+
+## set the levels in order we want
+new_map2 <- transform(new_map, zipcode = reorder(zipcode, profit_10))
+
+ggplot(new_map2, aes(zipcode, profit_10)) + geom_col(fill = 'dark green') + coord_flip() + ggtitle("Most profitable zip codes") + labs(y = "Profit over 10 years(in %)")
+
+```
+
+### Finally, where do I find these zip codes ?
+
+The following map is a representation of locations of zipcodes coloured by the profits they generate. 
+
+```{r}
+
+# Making maps
+
+library(leaflet)
+
+profit <- paste0("Zipcode = ", new_map$zipcode, "<br>",
+  "Profit % = ", as.character(format(new_map$profit_10, digits = 2)), "% over 10 years")
+
+# Defining color palette
+
+col_pal <- colorNumeric(c("red", "blue", "gold") , domain =NULL, reverse = F)
+# Pass the palette function a data vector to get the corresponding colors
+col_pal(c(1,6,9))
+
+m <- leaflet(data = new_map) %>%
+  addTiles() %>% addProviderTiles(providers$CartoDB.DarkMatter) %>%  # Add default OpenStreetMap map tiles
+  addCircles(lng=new_map$INTPTLONG, lat=new_map$INTPTLAT, radius=~ new_map$profit_10, color = ~col_pal(new_map$profit_10), popup = profit) %>%
+  addLegend("bottomright", pal = col_pal, values = ~new_map$profit_10,
+            title = "Profit over 10 years(in %)",
+            labFormat = labelFormat(suffix = "%"),
+            opacity = 1)
+m  # Print the map
+
+```
+
+Clearly, the most profitable zips are located in Staten Island due to a good trade-off between low intial investment and high AirBnb rentals. These zipcodes can generate over 200% profit in the next 10 years. Also, zipcodes in the Manhattan area are still far away from achieving break-even. Hence, the recommendation is to invest in the zipcodes of Staten Island to maximize returns.
+
+## Summary and the way forward
+
+### Best zip codes to invest in:
+
+```{r}
+
+library(knitr)
+kable(most_profitable_zips, row.names = F, align = 'c', caption = "Most profitable zip codes")
+
+
+```
+
+
+As you can see from the table above, most profitable zips are:
+
+***10308***
+
+***11434***
+
+***10304***
+
+***10306***
+
+All these have profits % greater than 100% for 10 year term and should definitely be considered for investment.
+
+### The way forward...
+
+While the current method is a proposed approach to conduct the analysis of predicting the best zip codes, a lot more can be done by incorporating the following ideas:
+
+1) **Time Series Analysis:** While the current year-over-year growth in value of properties has been taken consistent, time series analysis can be done to accurately estimate the value of properties in the next 10 years
+
+2) **Estimating values of listed apartments:** There is surely a correlation between how expensive the property is and the price per night charged by AirBnb. Prices of properties can be estimated through combining image recognition and neighbourhood valie estimate. Properties with low value but high Price/night can be targeted to maximise profits.
+
+3) **Utilizing real occupancy data :** Actual values of occupancy for each listing can be used to estimate amount of revenue generated per year.
+
+4) **Working with discounts:** A metric including the effect of discounts for longer stays can be created instead of price/night as there is a fluctuation in price/night with seasonality.
+
+
+### References
+
+#### Data sources:
+
+1) AirBnb Data: http://insideairbnb.com/get-the-data.html
+2) Zillow Data: http://www.zillow.com/research/data/
+3) Zip code location data: https://www.census.gov/geo/maps-data/data/gazetteer2017.html
+
+#### R libraries used
+
+1) rmarkdown
+2) sqldf
+3) ggplot2
+4) plyr
+5) knitr
+6) leaflet
+
+
+
