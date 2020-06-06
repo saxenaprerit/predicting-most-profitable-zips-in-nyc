@@ -5,3 +5,5 @@ The datasets used for the analysis are airbnb open source dataset and housing pr
 Tha datasets used are:
 1) NYC_listings.csv
 2) housing_prices.csv
+
+Another dataset 2017_Gaz_zcta_national.txt has been used to plot out the analysis on a map.
